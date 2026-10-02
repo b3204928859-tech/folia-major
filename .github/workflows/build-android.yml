@@ -35,6 +35,11 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Grant Android Storage Permissions
+        run: |
+          sed -i 's#</application>#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n</application>#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<application android:usesCleartextTraffic="true"#' android/app/src/main/AndroidManifest.xml
+
       - name: Copy web assets
         run: npx cap sync android
 
