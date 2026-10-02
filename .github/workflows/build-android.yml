@@ -13,13 +13,15 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Create .env file
+        run: |
+          echo "VITE_NETEASE_API_BASE=${{ secrets.VITE_NETEASE_API_BASE }}" > .env
+
       - name: Install dependencies
         run: npm install
 
       - name: Build web version
         run: npm run build
-        env:
-          VITE_NETEASE_API_BASE: ${{ secrets.VITE_NETEASE_API_BASE }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
