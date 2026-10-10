@@ -110,10 +110,10 @@ jobs:
 
       - name: Optimize APK Size & Permissions
         run: |
-          # 1. 限制只打包 arm64-v8a 架构
+          # 1. 限制只打包 arm64-v8a 架构，缩减体积
           sed -i '/defaultConfig {/a\        ndk {\n            abiFilters "arm64-v8a"\n        }' android/app/build.gradle
 
-          # 2. 存储权限（注意：这里修正了放置位置，插入在 <application 标签之前）
+          # 2. 存储权限
           sed -i 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml
 
           # 3. 允许 HTTP 明文请求，强制硬件加速
@@ -127,3 +127,4 @@ jobs:
           sed -i 's#release {#release {\n                signingConfig signingConfigs.debug#' android/app/build.gradle
 
       - name: Copy web assets
+        run: npx cap sync andr
