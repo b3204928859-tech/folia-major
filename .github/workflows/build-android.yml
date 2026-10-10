@@ -101,8 +101,8 @@ jobs:
           # 1. 限制只打包 arm64-v8a 架构，缩减体积
           sed -i '/defaultConfig {/a\        ndk {\n            abiFilters "arm64-v8a"\n        }' android/app/build.gradle
 
-          # 2. 存储权限
-          sed -i 's#</application>#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n</application>#' android/app/src/main/AndroidManifest.xml
+          # 2. 存储权限（修正：将其插入到 <application 标签之前，而不是 </application> 之前）
+          sed -i 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml
 
           # 3. 允许 HTTP 明文请求，强制硬件加速
           sed -i 's#<application#<application android:usesCleartextTraffic="true" android:hardwareAccelerated="true"#' android/app/src/main/AndroidManifest.xml
