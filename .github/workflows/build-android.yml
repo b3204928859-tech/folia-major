@@ -12,6 +12,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: 'npm' # 开启 Node.js 依赖缓存，加速打包
 
       - name: Create .env file
         run: |
@@ -20,32 +21,104 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Install Capacitor & Fullscreen Plugin
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/status-bar
+
+      - name: Optimize Touch & Inject Fullscreen
+        run: |
+          # 在构建前修改源码的 index.html，注入触控优化和全屏代码
+          node -e "
+          const fs = require('fs');
+          const path = 'index.html';
+          if (fs.existsSync(path)) {
+            let html = fs.readFileSync(path, 'utf8');
+            // 1. 触控优化：禁用缩放，消除 300ms 延迟
+            const viewportMeta = '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover\">';
+            if (html.includes('name=\"viewport\"')) {
+              html = html.replace(/<meta name=\"viewport\"[^>]*>/, viewportMeta);
+            } else {
+              html = html.replace('</head>', viewportMeta + '\n</head>');
+            }
+            // 2. 注入全屏插件和触控 CSS
+            const injection = \`
+            <style>
+              html, body, #app { touch-action: manipulation; overscroll-behavior: none; }
+            </style>
+            <script type=\"module\">
+              import { StatusBar } from '@capacitor/status-bar';
+              StatusBar.hide();
+              StatusBar.setOverlaysWebView({ overlay: true });
+            </script>
+            \`;
+            if (!html.includes('capacitor/status-bar')) {
+              html = html.replace('</body>', injection + '\n</body>');
+            }
+            fs.writeFileSync(path, html);
+          }
+          "
+
       - name: Build web version
         run: npm run build
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Install Capacitor
+      - name: Create Capacitor Config (Startup Optimization)
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-
-      - name: Init Capacitor
-        run: npx cap init folia com.folia.app --web-dir dist
+          # 强制使用深色背景防止启动白屏
+          node -e "
+          const fs = require('fs');
+          const config = {
+            appId: 'com.folia.app',
+            appName: 'Folia',
+            webDir: 'dist',
+            server: { androidScheme: 'https' },
+            android: { 
+              backgroundColor: '#121212', 
+              allowMixedContent: true, 
+              webContentsDebuggingEnabled: false 
+            }
+          };
+          fs.writeFileSync('capacitor.config.json', JSON.stringify(config, null, 2));
+          "
 
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Grant Permissions & Enable Fullscreen
+      # ================== 缓存 Gradle 依赖 ==================
+      - name: Cache Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      # =======================================================
+
+      - name: Optimize APK Size & Permissions
         run: |
-          # 1. 存储权限
+          # 1. 限制只打包 arm64-v8a 架构，缩减体积
+          node -e "
+          const fs = require('fs');
+          const path = 'android/app/build.gradle';
+          if (fs.existsSync(path)) {
+            let gradle = fs.readFileSync(path, 'utf8');
+            if (!gradle.includes('abiFilters')) {
+              gradle = gradle.replace(/(defaultConfig\s*\{)/, '\$1\n        ndk {\n            abiFilters \'arm64-v8a\'\n        }');
+              fs.writeFileSync(path, gradle);
+            }
+          }
+          "
+          # 2. 存储权限
           sed -i 's#<application#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml || true
-          # 2. 允许 HTTP 明文请求，强制硬件加速
+          # 3. 允许 HTTP 明文请求，强制硬件加速
           sed -i 's#<application#<application android:usesCleartextTraffic="true" android:hardwareAccelerated="true"#' android/app/src/main/AndroidManifest.xml || true
-          # 3. 全屏和沉浸模式
+          # 4. 全屏和沉浸模式（原生层面）
           node -e "
           const fs = require('fs');
           const path = 'android/app/src/main/res/values/styles.xml';
@@ -53,39 +126,4 @@ jobs:
             let xml = fs.readFileSync(path, 'utf8');
             if (!xml.includes('windowFullscreen')) {
                 xml = xml.replace('<item name=\"windowNoTitle\">true</item>', '<item name=\"windowNoTitle\">true</item>\n        <item name=\"android:windowFullscreen\">true</item>\n        <item name=\"android:windowLayoutInDisplayCutoutMode\">shortEdges</item>\n        <item name=\"android:windowTranslucentStatus\">true</item>');
-                fs.writeFileSync(path, xml);
-            }
-          }
-          "
-
-      - name: Configure Release Signing (Use Debug Key)
-        run: |
-          # 使用 Node.js 修改 build.gradle，让 Release 版本使用默认的 Debug 签名，免去配置 KeyStore 的麻烦
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/build.gradle';
-          if (fs.existsSync(path)) {
-            let gradle = fs.readFileSync(path, 'utf8');
-            if (!gradle.includes('signingConfig signingConfigs.debug')) {
-                gradle = gradle.replace(/release\s*\{/, 'release {\n                signingConfig signingConfigs.debug');
-                fs.writeFileSync(path, gradle);
-            }
-          }
-          "
-
-      - name: Copy web assets
-        run: npx cap sync android
-
-      - name: Build APK (Release)
-        run: |
-          cd android
-          chmod +x gradlew
-          # 注意这里改成了 assembleRelease
-          ./gradlew assembleRelease
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: folia-release-apk
-          # 注意这里的路径改成了 release
-          path: android/app/build/outputs/apk/release/*.apk
+              
