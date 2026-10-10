@@ -27,36 +27,10 @@ jobs:
 
       - name: Optimize Touch & Inject Fullscreen
         run: |
-          # 在构建前修改源码的 index.html，注入触控优化和全屏代码
-          node -e "
-          const fs = require('fs');
-          const path = 'index.html';
-          if (fs.existsSync(path)) {
-            let html = fs.readFileSync(path, 'utf8');
-            // 1. 触控优化：禁用缩放，消除 300ms 延迟
-            const viewportMeta = '<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover\">';
-            if (html.includes('name=\"viewport\"')) {
-              html = html.replace(/<meta name=\"viewport\"[^>]*>/, viewportMeta);
-            } else {
-              html = html.replace('</head>', viewportMeta + '\n</head>');
-            }
-            // 2. 注入全屏插件和触控 CSS
-            const injection = \`
-            <style>
-              html, body, #app { touch-action: manipulation; overscroll-behavior: none; }
-            </style>
-            <script type=\"module\">
-              import { StatusBar } from '@capacitor/status-bar';
-              StatusBar.hide();
-              StatusBar.setOverlaysWebView({ overlay: true });
-            </script>
-            \`;
-            if (!html.includes('capacitor/status-bar')) {
-              html = html.replace('</body>', injection + '\n</body>');
-            }
-            fs.writeFileSync(path, html);
-          }
-          "
+          # 触控优化：禁用缩放，消除 300ms 延迟
+          sed -i 's#<head>#<head>\n    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">\n    <style>\n      html, body, #app { touch-action: manipulation; overscroll-behavior: none; }\n    </style>#' index.html
+          # 注入全屏插件
+          sed -i 's#</body>#    <script type="module">\n      import { StatusBar } from "@capacitor/status-bar";\n      StatusBar.hide();\n      StatusBar.setOverlaysWebView({ overlay: true });\n    </script>\n</body>#' index.html
 
       - name: Build web version
         run: npm run build
@@ -68,22 +42,23 @@ jobs:
 
       - name: Create Capacitor Config (Startup Optimization)
         run: |
-          # 强制使用深色背景防止启动白屏
-          node -e "
-          const fs = require('fs');
-          const config = {
-            appId: 'com.folia.app',
-            appName: 'Folia',
-            webDir: 'dist',
-            server: { androidScheme: 'https' },
-            android: { 
-              backgroundColor: '#121212', 
-              allowMixedContent: true, 
-              webContentsDebuggingEnabled: false 
+          # 强制使用深色背景防止启动白屏（改用 Python 写入，避开引号冲突）
+          python3 -c '
+          import json
+          config = {
+            "appId": "com.folia.app",
+            "appName": "Folia",
+            "webDir": "dist",
+            "server": { "androidScheme": "https" },
+            "android": { 
+              "backgroundColor": "#121212", 
+              "allowMixedContent": True, 
+              "webContentsDebuggingEnabled": False 
             }
-          };
-          fs.writeFileSync('capacitor.config.json', JSON.stringify(config, null, 2));
-          "
+          }
+          with open("capacitor.config.json", "w") as f:
+              json.dump(config, f, indent=2)
+          '
 
       - name: Add Android platform
         run: npx cap add android
@@ -103,27 +78,32 @@ jobs:
       - name: Optimize APK Size & Permissions
         run: |
           # 1. 限制只打包 arm64-v8a 架构，缩减体积
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/build.gradle';
-          if (fs.existsSync(path)) {
-            let gradle = fs.readFileSync(path, 'utf8');
-            if (!gradle.includes('abiFilters')) {
-              gradle = gradle.replace(/(defaultConfig\s*\{)/, '\$1\n        ndk {\n            abiFilters \'arm64-v8a\'\n        }');
-              fs.writeFileSync(path, gradle);
-            }
-          }
-          "
+          sed -i '/defaultConfig {/a\        ndk {\n            abiFilters "arm64-v8a"\n        }' android/app/build.gradle
+
           # 2. 存储权限
-          sed -i 's#<application#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml || true
+          sed -i 's#</application>#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n</application>#' android/app/src/main/AndroidManifest.xml
+
           # 3. 允许 HTTP 明文请求，强制硬件加速
-          sed -i 's#<application#<application android:usesCleartextTraffic="true" android:hardwareAccelerated="true"#' android/app/src/main/AndroidManifest.xml || true
+          sed -i 's#<application#<application android:usesCleartextTraffic="true" android:hardwareAccelerated="true"#' android/app/src/main/AndroidManifest.xml
+
           # 4. 全屏和沉浸模式（原生层面）
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/src/main/res/values/styles.xml';
-          if (fs.existsSync(path)) {
-            let xml = fs.readFileSync(path, 'utf8');
-            if (!xml.includes('windowFullscreen')) {
-                xml = xml.replace('<item name=\"windowNoTitle\">true</item>', '<item name=\"windowNoTitle\">true</item>\n        <item name=\"android:windowFullscreen\">true</item>\n        <item name=\"android:windowLayoutInDisplayCutoutMode\">shortEdges</item>\n        <item name=\"android:windowTranslucentStatus\">true</item>');
-              
+          sed -i 's#</style>#    <item name="android:windowFullscreen">true</item>\n    <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>\n    <item name="android:windowTranslucentStatus">true</item>\n</style>#' android/app/src/main/res/values/styles.xml
+
+      - name: Configure Release Signing (Use Debug Key)
+        run: |
+          sed -i 's#release {#release {\n                signingConfig signingConfigs.debug#' android/app/build.gradle
+
+      - name: Copy web assets
+        run: npx cap sync android
+
+      - name: Build APK (Release)
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: folia-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
