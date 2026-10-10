@@ -39,13 +39,13 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Grant Permissions & Optimize
+      - name: Grant Permissions & Enable Fullscreen
         run: |
           # 1. 存储权限
           sed -i 's#<application#    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml || true
-          # 2. 允许 HTTP 明文请求，并强制开启硬件加速
+          # 2. 允许 HTTP 明文请求，强制硬件加速
           sed -i 's#<application#<application android:usesCleartextTraffic="true" android:hardwareAccelerated="true"#' android/app/src/main/AndroidManifest.xml || true
-          # 3. 使用 Node.js 安全地修改样式，实现全屏沉浸模式
+          # 3. 全屏和沉浸模式
           node -e "
           const fs = require('fs');
           const path = 'android/app/src/main/res/values/styles.xml';
@@ -58,17 +58,34 @@ jobs:
           }
           "
 
+      - name: Configure Release Signing (Use Debug Key)
+        run: |
+          # 使用 Node.js 修改 build.gradle，让 Release 版本使用默认的 Debug 签名，免去配置 KeyStore 的麻烦
+          node -e "
+          const fs = require('fs');
+          const path = 'android/app/build.gradle';
+          if (fs.existsSync(path)) {
+            let gradle = fs.readFileSync(path, 'utf8');
+            if (!gradle.includes('signingConfig signingConfigs.debug')) {
+                gradle = gradle.replace(/release\s*\{/, 'release {\n                signingConfig signingConfigs.debug');
+                fs.writeFileSync(path, gradle);
+            }
+          }
+          "
+
       - name: Copy web assets
         run: npx cap sync android
 
-      - name: Build APK
+      - name: Build APK (Release)
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          # 注意这里改成了 assembleRelease
+          ./gradlew assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: folia-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: folia-release-apk
+          # 注意这里的路径改成了 release
+          path: android/app/build/outputs/apk/release/*.apk
