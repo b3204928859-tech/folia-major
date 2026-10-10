@@ -27,10 +27,31 @@ jobs:
 
       - name: Optimize Touch & Inject Fullscreen
         run: |
-          # 触控优化：禁用缩放，消除 300ms 延迟
-          sed -i 's#<head>#<head>\n    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">\n    <style>\n      html, body, #app { touch-action: manipulation; overscroll-behavior: none; }\n    </style>#' index.html
-          # 注入全屏插件
-          sed -i 's#</body>#    <script type="module">\n      import { StatusBar } from "@capacitor/status-bar";\n      StatusBar.hide();\n      StatusBar.setOverlaysWebView({ overlay: true });\n    </script>\n</body>#' index.html
+          # 改用 Python3 脚本，完全避开 sed 特殊符号问题
+          python3 -c '
+          import re
+          with open("index.html", "r", encoding="utf-8") as f:
+              html = f.read()
+          # 1. 触控优化：注入 viewport 和 CSS
+          meta = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover\">"
+          style = "<style>html, body, #app { touch-action: manipulation; overscroll-behavior: none; }</style>"
+          if "<meta name=\"viewport\"" in html:
+              html = re.sub(r"<meta name=\"viewport\"[^>]*>", meta, html)
+          else:
+              html = html.replace("<head>", "<head>\n" + meta)
+          if "</head>" in html:
+              html = html.replace("</head>", style + "\n</head>")
+          # 2. 注入全屏插件
+          injection = """<script type=\"module\">
+            import { StatusBar } from \"@capacitor/status-bar\";
+            StatusBar.hide();
+            StatusBar.setOverlaysWebView({ overlay: true });
+          </script>"""
+          if "capacitor/status-bar" not in html:
+              html = html.replace("</body>", injection + "\n</body>")
+          with open("index.html", "w", encoding="utf-8") as f:
+              f.write(html)
+          '
 
       - name: Build web version
         run: npm run build
@@ -42,7 +63,7 @@ jobs:
 
       - name: Create Capacitor Config (Startup Optimization)
         run: |
-          # 强制使用深色背景防止启动白屏（改用 Python 写入，避开引号冲突）
+          # 强制使用深色背景防止启动白屏
           python3 -c '
           import json
           config = {
