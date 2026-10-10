@@ -27,12 +27,11 @@ jobs:
 
       - name: Optimize Touch & Inject Fullscreen
         run: |
-          # 改用 Python3 脚本，完全避开 sed 特殊符号问题
+          # 用 Python 注入触控优化和全屏逻辑，避开引号坑
           python3 -c '
           import re
           with open("index.html", "r", encoding="utf-8") as f:
               html = f.read()
-          # 1. 触控优化：注入 viewport 和 CSS
           meta = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover\">"
           style = "<style>html, body, #app { touch-action: manipulation; overscroll-behavior: none; }</style>"
           if "<meta name=\"viewport\"" in html:
@@ -41,7 +40,6 @@ jobs:
               html = html.replace("<head>", "<head>\n" + meta)
           if "</head>" in html:
               html = html.replace("</head>", style + "\n</head>")
-          # 2. 注入全屏插件
           injection = """<script type=\"module\">
             import { StatusBar } from \"@capacitor/status-bar\";
             StatusBar.hide();
@@ -63,7 +61,7 @@ jobs:
 
       - name: Create Capacitor Config (Startup Optimization)
         run: |
-          # 强制使用深色背景防止启动白屏
+          # 深色启动背景
           python3 -c '
           import json
           config = {
@@ -96,12 +94,26 @@ jobs:
             ${{ runner.os }}-gradle-
       # =======================================================
 
+      - name: Replace App Icon
+        run: |
+          # 检查根目录是否存在 icon.png，如果存在则替换安卓默认图标
+          if [ -f "icon.png" ]; then
+            for dpi in hdpi mdpi xhdpi xxhdpi xxxhdpi; do
+              cp icon.png android/app/src/main/res/mipmap-$dpi/ic_launcher.png || true
+              cp icon.png android/app/src/main/res/mipmap-$dpi/ic_launcher_round.png || true
+              cp icon.png android/app/src/main/res/mipmap-$dpi/ic_launcher_foreground.png || true
+            done
+            echo "图标替换成功！"
+          else
+            echo "未找到 icon.png，保留默认图标。"
+          fi
+
       - name: Optimize APK Size & Permissions
         run: |
-          # 1. 限制只打包 arm64-v8a 架构，缩减体积
+          # 1. 限制只打包 arm64-v8a 架构
           sed -i '/defaultConfig {/a\        ndk {\n            abiFilters "arm64-v8a"\n        }' android/app/build.gradle
 
-          # 2. 存储权限（修正：将其插入到 <application 标签之前，而不是 </application> 之前）
+          # 2. 存储权限（注意：这里修正了放置位置，插入在 <application 标签之前）
           sed -i 's#<application#<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n<application#' android/app/src/main/AndroidManifest.xml
 
           # 3. 允许 HTTP 明文请求，强制硬件加速
@@ -115,16 +127,3 @@ jobs:
           sed -i 's#release {#release {\n                signingConfig signingConfigs.debug#' android/app/build.gradle
 
       - name: Copy web assets
-        run: npx cap sync android
-
-      - name: Build APK (Release)
-        run: |
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: folia-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
