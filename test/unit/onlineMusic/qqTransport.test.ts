@@ -112,13 +112,22 @@ describe('QQ Music Web transport', () => {
     });
 
     // 3.2.0 起网关码与凭证拒绝码同时出现时改回 502，正文是同一个协议模板（GatewayCredentialConflictError）：
-    // 仍是上游应答过的拒绝；新路由的 502 带 errorKey，照旧按服务失败处理。
-    it('reads the gateway/credential conflict 502 as an upstream refusal, but not a new-route 502', async () => {
+    // 仍是上游应答过的拒绝。新路由的 502 带 errorKey，不按这个模板认，按后端分的 kind：QQ 答了却拒绝的
+    // （`upstream-business` 等）算平台拒绝；连不上 QQ 的（`network`、`upstream-http`）和没有 kind 的照旧按服务失败处理。
+    it('reads the gateway/credential conflict 502 as an upstream refusal, and a new-route 502 by its kind', async () => {
         const backendText = 'get-music-play failed (HTTP 200, global=2000, code=1000)';
         vi.stubGlobal('fetch', vi.fn()
             .mockResolvedValueOnce(Response.json({ error: backendText }, { status: 502 }))
             .mockResolvedValueOnce(Response.json(
                 { code: 502, kind: 'upstream-business', errorKey: 'upstream.unknown', message: backendText, retryable: false },
+                { status: 502 },
+            ))
+            .mockResolvedValueOnce(Response.json(
+                { code: 502, kind: 'network', errorKey: 'network.timeout', message: 'Upstream request timed out', retryable: true },
+                { status: 502 },
+            ))
+            .mockResolvedValueOnce(Response.json(
+                { code: 502, errorKey: 'upstream.unknown', message: 'Upstream rejected the request' },
                 { status: 502 },
             )));
         const { requestQq } = await import('@/services/onlineMusic/qq/qqTransport');
@@ -129,7 +138,13 @@ describe('QQ Music Web transport', () => {
 
         const newRoute = await requestQq('user_daily_songs').catch((thrown: unknown) => thrown);
         expect(newRoute).toMatchObject({ code: 'network', httpStatus: 502 });
-        expect(describeQqFailure('collection', newRoute)).not.toHaveProperty('case');
+        expect(describeQqFailure('collection', newRoute)).toMatchObject({ case: 'refused', httpStatus: 502 });
+
+        const unreachable = await requestQq('user_daily_songs').catch((thrown: unknown) => thrown);
+        expect(describeQqFailure('collection', unreachable)).not.toHaveProperty('case');
+
+        const noKind = await requestQq('user_daily_songs').catch((thrown: unknown) => thrown);
+        expect(describeQqFailure('collection', noKind)).not.toHaveProperty('case');
     });
 
     it.each([
@@ -476,11 +491,12 @@ describe('QQ Music Web transport', () => {
         await expect(requestQq('login_status')).resolves.toEqual({ code: 200, data: {} });
     });
 
-    it('maps 401 to auth-required and clears the stored session', async () => {
+    // 任何路由在 QQ 拒绝这一次调用时都回 401，不说明登录没了：问一次 login_status，它还认得这个用户，session 就留着。
+    it('maps 401 to auth-required and keeps the stored session while login_status still names the user', async () => {
         storage.set('online_provider:qq:cookie', CONFIRMED_COOKIE);
-        const fetchMock = vi.fn().mockResolvedValue(
-            Response.json({ code: 401, message: 'Login required' }, { status: 401 }),
-        );
+        const fetchMock = vi.fn(async (url: string) => (url.includes('/login/status')
+            ? Response.json({ code: 200, data: { profile: { musicid: 123 } } })
+            : Response.json({ code: 401, message: 'Login required' }, { status: 401 })));
         vi.stubGlobal('fetch', fetchMock);
         const { hasQqSession, requestQq } = await import('@/services/onlineMusic/qq/qqTransport');
 
@@ -488,8 +504,85 @@ describe('QQ Music Web transport', () => {
             code: 'auth-required',
             providerId: 'qq',
         });
-        expect(storage.has('online_provider:qq:cookie')).toBe(false);
-        expect(hasQqSession()).toBe(false);
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(storage.get('online_provider:qq:cookie')).toBe(CONFIRMED_COOKIE);
+        expect(hasQqSession()).toBe(true);
+    });
+
+    // 登录在 Folia 开着时到期：第一次 401 后问一次 login_status，后端不再认出这个用户就清掉 session，之后的歌按游客播放。
+    it('drops the session after a 401 once login_status no longer names the user, asking once at a time', async () => {
+        storage.set('online_provider:qq:cookie', CONFIRMED_COOKIE);
+        const fetchMock = vi.fn(async (url: string) => (url.includes('/login/status')
+            ? Response.json({ code: 200, data: {} })
+            : Response.json({ code: 401, message: 'Login required' }, { status: 401 })));
+        vi.stubGlobal('fetch', fetchMock);
+        const { requestQq } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await Promise.all(['a', 'b'].map(songmid => expect(requestQq('music_play', { songmid })).rejects.toMatchObject({ code: 'auth-required' })));
+        await vi.waitFor(() => expect(storage.has('online_provider:qq:cookie')).toBe(false));
+        expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/login/status'))).toHaveLength(1);
+        await expect(requestQq('music_play', { songmid: 'c' })).rejects.toMatchObject({ code: 'auth-required' });
+        expect(String(fetchMock.mock.calls.at(-1)?.[0])).not.toContain('cookie=');
+    });
+
+    // login_status 自己的 401 不再问；401 时存着的已经换成别的 session，也不问。
+    it('checks only after a 401 on another route, and only while the session sent is the one stored', async () => {
+        storage.set('online_provider:qq:cookie', CONFIRMED_COOKIE);
+        let answerRefusal: (() => void) | undefined;
+        const fetchMock = vi.fn((url: string) => (url.includes('/getMusicPlay/held')
+            ? new Promise<Response>(resolve => { answerRefusal = () => resolve(Response.json({}, { status: 401 })); })
+            : Promise.resolve(Response.json({ code: 401 }, { status: 401 }))));
+        vi.stubGlobal('fetch', fetchMock);
+        const { requestQq } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQq('login_status')).rejects.toMatchObject({ code: 'auth-required' });
+        const refused = requestQq('music_play', { songmid: 'held' });
+        await vi.waitFor(() => expect(answerRefusal).toBeTypeOf('function'));
+        storage.set('online_provider:qq:cookie', 'qqmusic_session=signed-in-again');
+        answerRefusal!();
+        await expect(refused).rejects.toMatchObject({ code: 'auth-required' });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        // A 401 with the session stored now is checked: login_status refuses it as well, and it goes.
+        await expect(requestQq('music_play', { songmid: 'other' })).rejects.toMatchObject({ code: 'auth-required' });
+        await vi.waitFor(() => expect(storage.has('online_provider:qq:cookie')).toBe(false));
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    // 主进程这次没读出加密的登录仓库（没有系统加密）：存着的 session 不带，按游客播放，session 留着。这次扫码登录时仓库把读不出的
+    // 那份删掉（qqAuthSessionRepository 的 save），主进程从此答读得出：新 session 照常带，页面重新载入以后也带。
+    it('does not send the stored session while the sign-in store is unreadable, but sends one signed in this run, also after a reload', async () => {
+        vi.stubEnv('VITE_QQ_API_BASE', '');
+        storage.set('online_provider:qq:cookie', CONFIRMED_COOKIE);
+        const backend = { storeUnreadable: true };
+        const getQqApiStatus = vi.fn(async () => ({ status: 'running', port: 4000, error: null, sessionStoreUnreadable: backend.storeUnreadable }));
+        vi.stubGlobal('window', { electron: { getQqPort: vi.fn().mockResolvedValue(4000), getQqApiStatus } });
+        const fetchMock = vi.fn(async (url: string) => {
+            if (!url.includes('/login/qr/check')) return Response.json({ code: 200, data: {} });
+            backend.storeUnreadable = false;
+            return Response.json({ code: 803, cookie: 'qqmusic_session=signed-in-now' });
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const transport = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await transport.requestQq('login_status');
+        expect(String(fetchMock.mock.calls.at(-1)?.[0])).not.toContain('cookie=');
+        expect(await transport.isQqSessionParked()).toBe(true);
+        expect(transport.hasUsableQqSession()).toBe(false);
+        expect(storage.get('online_provider:qq:cookie')).toBe(CONFIRMED_COOKIE);
+
+        await transport.requestQq('login_qr_check', { key: 'k' });
+        await transport.requestQq('login_status');
+        expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(`cookie=${encodeURIComponent('qqmusic_session=signed-in-now')}`);
+        expect(await transport.isQqSessionParked()).toBe(false);
+        expect(transport.hasUsableQqSession()).toBe(true);
+
+        // The page is loaded again in the same run (a renderer crash, a reopening without mods).
+        vi.resetModules();
+        const reloaded = await import('@/services/onlineMusic/qq/qqTransport');
+        await reloaded.requestQq('login_status');
+        expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(`cookie=${encodeURIComponent('qqmusic_session=signed-in-now')}`);
+        expect(await reloaded.isQqSessionParked()).toBe(false);
     });
 
     it('maps upstream failures to a network error carrying the backoff body', async () => {
@@ -675,6 +768,7 @@ describe('QQ Music Web transport', () => {
     });
 
     // 新路由的 message 是通用英文，真正说明失败类别的是 errorKey，上游数字码另放；两样都要交出去。
+    // 应用里写入的失败不经过 describeQqFailure（omni 只为播放和读集合调用它），这里只看一个错怎么读。
     it('names the errorKey and upstream code of a new-route failure', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(
             { code: 502, kind: 'upstream-business', errorKey: 'playlist.already-applied', message: 'Upstream rejected the request', retryable: false, upstreamCode: 80092 },
@@ -687,7 +781,7 @@ describe('QQ Music Web transport', () => {
 
         expect(error).toMatchObject({ code: 'network', httpStatus: 502 });
         expect(describeQqFailure('collection', error)).toEqual({
-            httpStatus: 502, message: 'playlist.already-applied upstream 80092: Upstream rejected the request',
+            case: 'refused', httpStatus: 502, upstreamCode: '80092', message: 'playlist.already-applied upstream 80092: Upstream rejected the request',
         });
     });
 
@@ -701,5 +795,207 @@ describe('QQ Music Web transport', () => {
             code: 'unavailable',
             message: 'Embedded QQMusicApi is not running (status error: listen: EADDRINUSE)',
         });
+    });
+});
+
+// 直发 musicu 的请求（按数字 songid 查歌、批量查歌）：不经 qq-music-api 后端，桌面端直连，网页版经同源的 /api/lyric-proxy。
+describe('QQ musicu requests', () => {
+    const MUSICU = 'https://u.y.qq.com/cgi-bin/musicu.fcg';
+    const RELAYED = '/api/lyric-proxy?url=https%3A%2F%2Fu.y.qq.com%2Fcgi-bin%2Fmusicu.fcg';
+    const DETAIL = { module: 'music.pf_song_detail_svr', method: 'get_song_detail_yqq', param: { song_type: 0, song_id: 97773 } };
+    // QQ 的回答是 text/plain 的 JSON（实测）。
+    const musicuAnswer = (body: unknown, init: ResponseInit = {}) => new Response(
+        typeof body === 'string' ? body : JSON.stringify(body),
+        { ...init, headers: { 'content-type': 'text/plain; charset=utf-8', ...(init.headers ?? {}) } },
+    );
+    const answered = () => vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => musicuAnswer({
+        code: 0, ts: 1, q0: { code: 0, data: { track_info: { id: 97773, mid: '0039MnYb0qxYhV' } } },
+    }));
+    const failureOf = (promise: Promise<unknown>) => promise.then(
+        () => null,
+        (failure: unknown) => failure as { code?: string; httpStatus?: number; retryAfterMs?: number; cause?: unknown; message?: string },
+    );
+
+    beforeEach(() => {
+        vi.resetModules();
+        storage.clear();
+        // 这条路不看后端地址：两者都没有时也照发。
+        vi.stubEnv('VITE_QQ_API_BASE', '');
+        vi.stubGlobal('localStorage', {
+            getItem: (key: string) => storage.get(key) ?? null,
+            setItem: (key: string, value: string) => storage.set(key, value),
+            removeItem: (key: string) => storage.delete(key),
+        });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+    });
+
+    it('posts straight to musicu on the desktop, without credentials and without the embedded backend', async () => {
+        vi.stubGlobal('window', { electron: {} });
+        const fetchMock = answered();
+        vi.stubGlobal('fetch', fetchMock);
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQqMusicu({ q0: DETAIL })).resolves.toEqual({
+            q0: { code: 0, data: { track_info: { id: 97773, mid: '0039MnYb0qxYhV' } } },
+        });
+        const [target, init] = fetchMock.mock.calls[0];
+        expect(String(target)).toBe(MUSICU);
+        expect(init).toMatchObject({ method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/json' } });
+        expect(JSON.parse(String(init?.body))).toEqual({ comm: { ct: 24, cv: 0 }, q0: DETAIL });
+        expect(JSON.parse(String(init?.body)).q0.param.song_id).toBe(97773);
+    });
+
+    it('posts through the same-origin lyric relay on the web, without VITE_QQ_API_BASE', async () => {
+        const fetchMock = answered();
+        vi.stubGlobal('fetch', fetchMock);
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await requestQqMusicu({ q0: DETAIL });
+        const [target, init] = fetchMock.mock.calls[0];
+        expect(String(target)).toBe(RELAYED);
+        expect(init).toMatchObject({ method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } });
+        expect(JSON.parse(String(init?.body))).toEqual({ comm: { ct: 24, cv: 0 }, q0: DETAIL });
+    });
+
+    it.each([
+        ['the desktop', { electron: {} }],
+        ['the web', undefined],
+    ])('never carries the stored session on %s', async (_where, windowValue) => {
+        storage.set('online_provider:qq:cookie', CONFIRMED_COOKIE);
+        if (windowValue) vi.stubGlobal('window', windowValue);
+        const fetchMock = answered();
+        vi.stubGlobal('fetch', fetchMock);
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await requestQqMusicu({ q0: DETAIL });
+        const [target, init] = fetchMock.mock.calls[0];
+        expect(String(target)).not.toContain('cookie=');
+        expect(String(target)).not.toContain('opaque-token');
+        expect(init?.headers).toEqual({ 'Content-Type': 'application/json' });
+        expect(String(init?.body)).not.toContain('opaque-token');
+    });
+
+    it('hands back each asked key as its code and data, and nothing else', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => musicuAnswer({
+            code: 0,
+            ts: 1,
+            q0: { code: 404, data: { track_info: { mid: '' } } },
+            q1: { code: '0', data: { track_info: { mid: 'x' } } },
+            q2: { code: null },
+            q9: { code: 0, data: { extra: true } },
+        })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQqMusicu({ q0: DETAIL, q1: DETAIL, q2: DETAIL, q3: DETAIL })).resolves.toEqual({
+            q0: { code: 404, data: { track_info: { mid: '' } } },
+            q1: { code: 0, data: { track_info: { mid: 'x' } } },
+            q2: { code: undefined, data: undefined },
+            q3: { code: undefined, data: undefined },
+        });
+    });
+
+    it('reads a failed fetch as network, with the error as its cause', async () => {
+        const unreachable = new TypeError('Failed to fetch');
+        vi.stubGlobal('fetch', vi.fn().mockRejectedValue(unreachable));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        const error = await failureOf(requestQqMusicu({ q0: DETAIL }));
+        expect(error).toMatchObject({ code: 'network', cause: unreachable });
+        expect(error?.message).toBe('QQ musicu unreachable: Failed to fetch');
+        expect(error?.httpStatus).toBeUndefined();
+    });
+
+    it('gives up after its time limit and aborts the request', async () => {
+        vi.useFakeTimers();
+        let signal: AbortSignal | undefined;
+        vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+            signal = init?.signal ?? undefined;
+            return new Promise<Response>(() => undefined);
+        }));
+        const { requestQqMusicu, QQ_MUSICU_REQUEST_LIMIT_MS } = await import('@/services/onlineMusic/qq/qqTransport');
+        const { OnlineRequestTimeout } = await import('@/services/onlineMusic/failure/onlineRequestLimit');
+        expect(QQ_MUSICU_REQUEST_LIMIT_MS).toBe(20_000);
+
+        const pending = failureOf(requestQqMusicu({ q0: DETAIL }));
+        await vi.advanceTimersByTimeAsync(QQ_MUSICU_REQUEST_LIMIT_MS - 1);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+
+        const error = await pending;
+        expect(error).toBeInstanceOf(OnlineRequestTimeout);
+        expect(error).toMatchObject({ code: 'network' });
+        expect(signal?.aborted).toBe(true);
+    });
+
+    it('reads a 429 as network with its status, and the wait a Retry-After asks for', async () => {
+        vi.stubGlobal('fetch', vi.fn()
+            .mockResolvedValueOnce(musicuAnswer('', { status: 429 }))
+            .mockResolvedValueOnce(musicuAnswer('', { status: 429, headers: { 'Retry-After': '25' } })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        const bare = await failureOf(requestQqMusicu({ q0: DETAIL }));
+        expect(bare).toMatchObject({ code: 'network', httpStatus: 429 });
+        expect(bare?.retryAfterMs).toBeUndefined();
+        const waiting = await failureOf(requestQqMusicu({ q0: DETAIL }));
+        expect(waiting).toMatchObject({ code: 'network', httpStatus: 429, retryAfterMs: 25_000 });
+    });
+
+    it("keeps the status of a direct 500, which is QQ's own", async () => {
+        vi.stubGlobal('window', { electron: {} });
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(musicuAnswer('', { status: 500 })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQqMusicu({ q0: DETAIL })).rejects.toMatchObject({
+            code: 'network', httpStatus: 500, message: 'QQ musicu request failed: 500',
+        });
+    });
+
+    it.each([500, 502])("drops the status of the web relay's own %s", async (status) => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ error: 'Proxy request failed' }, { status })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        const error = await failureOf(requestQqMusicu({ q0: DETAIL }));
+        expect(error).toMatchObject({ code: 'network', message: `QQ musicu request failed: ${status}` });
+        expect(error?.httpStatus).toBeUndefined();
+    });
+
+    // 只托管静态文件、没有 /api/lyric-proxy 的部署：是连不上，不是「这条路由没有」。
+    it('reads a web 404 as network with its status, not as unsupported', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Not Found', { status: 404 })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQqMusicu({ q0: DETAIL })).rejects.toMatchObject({ code: 'network', httpStatus: 404 });
+    });
+
+    it('reads an HTML page as invalid-response', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<!doctype html><html></html>', {
+            headers: { 'content-type': 'text/html' },
+        })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        await expect(requestQqMusicu({ q0: DETAIL })).rejects.toMatchObject({ code: 'invalid-response' });
+    });
+
+    // 实测：一次超过 30 个子请求时，整次和各子请求都是 { code: 500000 }，没有 data。
+    it('reads a refused call as invalid-response with its code', async () => {
+        const requests = Object.fromEntries(Array.from({ length: 31 }, (_, index) => [`q${index}`, DETAIL]));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(musicuAnswer({
+            code: 500000,
+            ts: 1,
+            start_ts: 1,
+            traceid: 't',
+            ...Object.fromEntries(Object.keys(requests).map(key => [key, { code: 500000 }])),
+        })));
+        const { requestQqMusicu } = await import('@/services/onlineMusic/qq/qqTransport');
+
+        const error = await failureOf(requestQqMusicu(requests));
+        expect(error).toMatchObject({ code: 'invalid-response', cause: { code: 500000 } });
+        expect(error?.message).toContain('500000');
     });
 });

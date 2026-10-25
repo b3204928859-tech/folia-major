@@ -3,6 +3,7 @@ import { isSyncConfigured } from '../../../services/sync/syncConfig';
 import { buildObsCustomCss } from '../../../services/obs/obsCustomCss';
 import { hasUploadedObsAsset } from '../../../services/obs/visualSettingsConfig';
 import type { CommandPaletteCommand } from '../types';
+import type { GpuPreference } from '../../../stores/useDesktopSettingsStore';
 import { createToggleCommand, createAppLanguageCommand, createSettingsCommand, createSettingsAnchorCommand, defineCommand } from '../commandFactories';
 import { sleepTimerCommand } from './sleepTimerCommand';
 import { lyricExportCommands } from './lyricExportCommands';
@@ -17,6 +18,24 @@ import { copyText } from '../../../utils/system/clipboard';
 
 // src/components/command-palette/commands/settingsCommands.ts
 // Commands in the `settings` group: settings subviews, app toggles, theme, sync, and desktop-only switches.
+
+/** One command per render GPU choice (Windows only), hidden while it is the saved one. */
+function gpuPreferenceCommand(preference: GpuPreference, title: string, description: string, keywords: string[]): CommandPaletteCommand {
+    return defineCommand({
+        id: `gpu-preference-${preference}`,
+        platform: ['win'],
+        isAvailable: context => (context ? context.settings.gpuPreference() !== preference : true),
+        group: 'settings',
+        title,
+        description,
+        keywords,
+        execute: (_input, context) => {
+            if (context.settings.gpuPreference() === preference) return false;
+            context.settings.setGpuPreference(preference);
+            return true;
+        },
+    });
+}
 
 export const settingsCommands: CommandPaletteCommand[] = [
     createSettingsCommand('settings-help', 'Open Help', 'Open help and shortcuts', ['help', '帮助'], 'help', null, { executeShortcut: 'h' }),
@@ -34,6 +53,7 @@ export const settingsCommands: CommandPaletteCommand[] = [
     sleepTimerCommand,
     createSettingsCommand('settings-options', 'Open Options', 'Open the options center', ['settings', 'options', '设置', '选项'], 'options', null, { executeShortcut: 'o' }),
     createSettingsCommand('settings-appearance', 'Appearance settings', 'Open visual and appearance settings', ['appearance', 'visual settings', '外观', '视觉'], 'options', 'appearance'),
+    createSettingsAnchorCommand('settings-ai-provider', 'AI provider settings', 'Choose an AI provider and model', ['model connection', 'api key', '模型设置', '供应商', '密钥', 'deepseek', 'kimi', 'glm', 'qwen', '通义', '智谱'], 'electronSettings', { platform: ['electron'] }),
     createSettingsAnchorCommand('settings-theme-presets', 'Theme presets', 'Jump to the built-in and saved theme presets', ['preset theme', 'color preset', '预设主题'], 'themePresets'),
     createSettingsAnchorCommand('settings-lyrics-renderer', 'Lyrics renderer', 'Jump to how lyrics are drawn on the player', ['lyric renderer', 'lyric engine', '歌词渲染'], 'lyricsRenderer'),
     createSettingsAnchorCommand('settings-grid-card-style', 'Grid card style', 'Jump to how the home grid draws its cards', ['card style', 'polaroid', 'grid style', '卡片样式'], 'grid3dCardStyle'),
@@ -115,6 +135,7 @@ export const settingsCommands: CommandPaletteCommand[] = [
     ...libraryWallLookCommands,
     createSettingsAnchorCommand('settings-pinned-commands', 'Pinned command slots', 'Choose the three commands pinned in the palette', ['pinned commands', 'quick slots', '固定命令'], 'pinnedCommands'),
     createSettingsCommand('settings-interaction', 'Interaction settings', 'Open keyboard, shortcut and grid interaction settings', ['interaction', 'keyboard', 'hotkey', '交互', '快捷键设置'], 'options', 'interaction'),
+    createSettingsAnchorCommand('settings-global-shortcuts', 'Global shortcuts', 'Jump to the system-wide shortcuts for playback and mod commands', ['global hotkey', 'system shortcut', 'media keys', '全局快捷键', '系统快捷键'], 'globalShortcuts', { platform: ['electron'] }),
     createSettingsAnchorCommand('settings-custom-shortcut', 'Custom shortcuts', 'Jump to the custom keyboard shortcut bindings', ['keybinding', 'rebind', 'hotkey', '自定义快捷键'], 'customShortcut'),
     createSettingsAnchorCommand('settings-grid-action-button', 'Grid action button', 'Jump to what the grid action button slides to', ['grid button', 'action button', '海报墙按钮'], 'gridActionButton'),
     createSettingsCommand('settings-playback', 'Playback settings', 'Open playback behavior settings', ['playback', '播放', '播放设置'], 'options', 'playback'),
@@ -328,6 +349,15 @@ export const settingsCommands: CommandPaletteCommand[] = [
             return true;
         },
     },
+    createToggleCommand(
+        'desktop-toggle-background-throttling',
+        'settings',
+        'Background throttling',
+        'Toggle throttling rendering and holding the lyric animation while Folia is minimised or hidden',
+        ['throttle when hidden', 'pause lyrics when minimized', 'stop animation in background', 'power saving', '后台节流', '后台暂停歌词', '最小化停止动画', '省电'],
+        context => context.settings.toggleBackgroundThrottling(),
+        { platform: ['electron'] },
+    ),
     createSettingsCommand('settings-wallpaper-mode', 'Wallpaper mode settings', 'Open wallpaper mode settings', ['wallpaper mode', 'desktop wallpaper', 'lyrics wallpaper', '壁纸模式', '桌面壁纸', '歌词壁纸'], 'options', 'desktop', { platform: ['linux', 'win', 'mac'] }),
     {
         id: 'desktop-toggle-wallpaper-mode',
@@ -372,6 +402,15 @@ export const settingsCommands: CommandPaletteCommand[] = [
         context => context.settings.toggleHideRemoteControlTitlebar(),
         { platform: ['electron'] },
     ),
+    createToggleCommand(
+        'desktop-toggle-remote-control-expand-cover',
+        'settings',
+        'Remote control: expand cover',
+        'Toggle whether the remote control window expands the cover into a large image when idle',
+        ['remote control cover', 'remote window cover', 'expand cover', 'album sleeve', 'large cover', '遥控窗口封面', '展开封面', '封面大图'],
+        context => context.settings.toggleRemoteControlExpandCover(),
+        { platform: ['electron'] },
+    ),
     {
         // Pairs with the remote control click-through switch: while the window ignores the mouse this is the way back in.
         id: 'desktop-unlock-remote-control',
@@ -386,6 +425,10 @@ export const settingsCommands: CommandPaletteCommand[] = [
         },
     },
     createSettingsCommand('settings-graphics', 'Graphics settings', 'Open static mode, frame rate cap, Linux glow fix and reduced motion', ['graphics', 'performance', 'frame rate', 'fps', 'rendering', '图形', '图形设置', '性能', '帧率', '渲染'], 'options', 'graphics'),
+    createSettingsAnchorCommand('settings-gpu-preference', 'Render GPU settings', 'Jump to the choice of graphics card the app renders on', ['render gpu', 'graphics card', 'discrete gpu', 'integrated gpu', 'dual gpu', '渲染显卡', '显卡', '独显', '核显', '双显卡'], 'gpuPreference', { platform: ['win'] }),
+    gpuPreferenceCommand('auto', 'Render GPU: Auto', 'Let Windows choose the graphics card; applies after a restart', ['render gpu auto', 'default gpu', '渲染显卡自动', '显卡自动']),
+    gpuPreferenceCommand('high-performance', 'Render GPU: High performance', 'Render on the discrete GPU; applies after a restart', ['render gpu high performance', 'discrete gpu', 'dedicated gpu', 'dgpu', 'nvidia', '渲染显卡高性能', '独显', '独立显卡']),
+    gpuPreferenceCommand('low-power', 'Render GPU: Power saving', 'Render on the integrated GPU; applies after a restart', ['render gpu power saving', 'integrated gpu', 'igpu', 'battery', '渲染显卡省电', '核显', '集成显卡']),
     createSettingsCommand('settings-mods', 'Mod settings', 'Open the mod system switch and the installed mods', ['mod manager', 'mod system', 'plugins', '模组设置', '模组系统', '插件'], 'options', 'mods', { platform: ['electron'] }),
     // The lab category is gone; its largest group, the player page switches, keeps the command.
     createSettingsAnchorCommand('settings-lab', 'Player page interface', 'Jump to the switches that hide or pin parts of the player page', ['player interface', 'hide player controls', 'lab', 'experimental', '播放页界面', '实验', '实验室'], 'labPlayerUi'),
@@ -473,7 +516,7 @@ export const settingsCommands: CommandPaletteCommand[] = [
         'bottomUiSettings',
     ),
     createSettingsCommand('settings-visualizer', 'Visualizer settings', 'Open lyrics animation workbench', ['visualizer workbench', '可视化', '歌词动画', 'donghua'], 'options', 'visualizer'),
-    createSettingsCommand('settings-theme-park', 'Color', 'Open theme editor', ['theme park', 'theme', '配色', '主题', '主题公园'], 'options', 'themePark', { executeShortcut: 't' }),
+    createSettingsCommand('settings-theme-park', 'Color', 'Open theme editor', ['theme park', 'theme', '配色', '主题', '主题公园', '主题乐园'], 'options', 'themePark', { executeShortcut: 't' }),
     createSettingsCommand('settings-global-lyric-offset', 'Global timing offset', 'Calibrate lyric timing against Bluetooth or device audio latency', ['lyric delay', 'audio latency', 'bluetooth delay', 'sync lyrics', '全局时间偏移', '歌词延迟', '音画同步', '蓝牙延迟'], 'options', 'globalLyricOffset'),
     createSettingsCommand('settings-lyric-filter', 'Lyric filter', 'Open lyric filter settings', ['lyrics filter', '歌词过滤', '过滤'], 'options', 'lyricFilter'),
     {
@@ -623,6 +666,7 @@ export const settingsCommands: CommandPaletteCommand[] = [
     createToggleCommand('settings-toggle-fullscreen-titlebar-button', 'settings', 'Toggle fullscreen button visibility', 'Show or hide the fullscreen button in the desktop window controls', ['fullscreen button', 'titlebar fullscreen', 'window fullscreen button', 'show fullscreen control', 'hide fullscreen button', 'fullscreen button visibility', '全屏按钮', '标题栏全屏按钮', '显示全屏按钮', '隐藏全屏按钮', '窗口全屏控制', 'quanping annniu', 'biaotilan quanping'], context => context.settings.toggleHideFullscreenButton(), { platform: ['electron'] }),
     createToggleCommand('settings-toggle-native-mac-fullscreen-button', 'settings', 'Native macOS fullscreen button', 'Toggle whether the macOS window control enters native fullscreen instead of maximizing', ['mac window control', 'native fullscreen', 'maximize button', 'macOS 全屏', '原生全屏', '窗口按钮'], context => context.settings.toggleNativeMacFullscreenButton(), { platform: ['mac'] }),
     createToggleCommand('settings-toggle-cursor-auto-hide', 'settings', 'Hide cursor with player controls', 'Toggle whether the mouse pointer disappears together with the auto-hidden player controls', ['cursor', 'mouse pointer', 'hide cursor', 'hide mouse', 'pointer', '鼠标', '鼠标指针', '隐藏鼠标', '隐藏指针', '指针自动隐藏'], context => context.settings.toggleAutoHideCursorWithPlayerChrome()),
+    createToggleCommand('settings-toggle-cursor-idle-hide', 'settings', 'Hide cursor when idle', 'Toggle hiding the mouse pointer after a pause while the player controls stay visible', ['idle cursor', 'auto hide cursor', 'hide mouse pointer', 'cursor idle', '鼠标空闲隐藏', '空闲隐藏鼠标', '单独隐藏鼠标', '自动隐藏鼠标'], context => context.settings.toggleHideCursorWhenIdle()),
     createToggleCommand('settings-toggle-auto-play-on-launch', 'settings', 'Auto-play on launch', 'Toggle whether opening the app resumes the last session by itself', ['autoplay', 'auto play', 'resume on open', 'play on startup', '自动播放', '启动自动播放', '进入应用自动播放', '续播'], context => context.settings.toggleAutoPlayOnLaunch()),
     createToggleCommand('settings-toggle-transcode-fallback', 'settings', 'Transcode unsupported audio', 'Toggle Electron recovery for local and Navidrome audio Chromium cannot decode', ['ffmpeg', 'unsupported audio', 'decode fallback', '无法解码', '转码恢复'], context => context.settings.toggleTranscodeFallback(), { platform: ['electron'] }),
     createToggleCommand('settings-toggle-playback-fade', 'settings', 'Fade on pause and resume', 'Toggle the short fade when pausing and resuming playback', ['fade', 'fade in', 'fade out', 'pause fade', 'smooth pause', 'crossfade pause', '淡入淡出', '暂停淡出', '播放淡入', '渐入渐出'], context => context.settings.togglePlaybackFade()),

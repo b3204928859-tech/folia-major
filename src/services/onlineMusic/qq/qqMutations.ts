@@ -1,8 +1,10 @@
 import type { SongResult } from '../../../types';
 import type { MediaId, OnlineMutationProvider, ProviderCollection } from '../../../types/onlineMusic';
 import { OnlineProviderError } from '../../../types/onlineMusic';
+import { normalizeQqCollection } from './qqNormalize';
+import { qqListKindOf } from './qqLists';
 import { requestQqSongDetail } from './qqSongDetail';
-import { hasQqSession, requestQq } from './qqTransport';
+import { hasUsableQqSession, requestQq } from './qqTransport';
 
 // src/services/onlineMusic/qq/qqMutations.ts
 // QQ 音乐的写入：往自建歌单加歌删歌、收藏歌单，以及查询收藏状态（qq-music-api 3.3.0）；红心与收藏专辑（3.3.1）。
@@ -139,7 +141,7 @@ const subscribeAlbum: NonNullable<OnlineMutationProvider['subscribeAlbum']> = as
  * 收藏按钮的状态留空（界面按未收藏显示，点了只会去收藏，不会误取消）。
  */
 export const getQqSubscriptionStatus = async (type: 'playlist' | 'album', id: MediaId): Promise<boolean> => {
-    if (!hasQqSession()) return false;
+    if (!hasUsableQqSession()) return false;
     const key = type === 'playlist' ? positiveInteger(id) : String(id ?? '').trim();
     if (key === null || key === '') return false;
     const response = await requestQq<any>('user_subscription_status', { type, ids: String(key) });
@@ -150,9 +152,30 @@ export const getQqSubscriptionStatus = async (type: 'playlist' | 'album', id: Me
     throw new OnlineProviderError('invalid-response', `QQ subscription status is ${String(status ?? 'missing')}`, 'qq', response);
 };
 
+/**
+ * 建一张自己的空歌单（qq-music-api 3.3.3）。后端写一次、从自建清单读回才回成功，名称也是读回的；
+ * 结果不明时回 502，可能已经建好了，这里不重送。
+ */
+const createPlaylist: NonNullable<OnlineMutationProvider['createPlaylist']> = async name => {
+    const response = await requestQq<any>('user_playlist_create', {}, { name });
+    if (positiveInteger(response?.tid) === null || positiveInteger(response?.dirId) === null) {
+        throw new OnlineProviderError('invalid-response', 'QQMusicApi user_playlist_create returned no playlist', 'qq', response);
+    }
+    // 和自建清单里的条目同一个形状（有 dirName 就是自建的），读账号时也就是同一张。
+    return normalizeQqCollection({
+        tid: response.tid,
+        dirId: response.dirId,
+        dirName: typeof response.name === 'string' && response.name ? response.name : name,
+        songNum: 0,
+    });
+};
+
 export const qqMutations: OnlineMutationProvider = {
     canAddToPlaylist: canEditQqPlaylistTracks,
     canEditPlaylistTracks: canEditQqPlaylistTracks,
+    // 排行榜和电台（探索页的卡片）不是歌单，收藏不了。
+    canSubscribe: collection => qqListKindOf(collection) === null,
+    createPlaylist,
     updatePlaylistTracks,
     subscribePlaylist,
     likeSong,

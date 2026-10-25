@@ -34,6 +34,7 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             volume: 0.5,
             isMuted: false,
             setVolume: vi.fn(),
+            stepVolume: vi.fn(),
             toggleMute: vi.fn(),
             toggleSongLike: vi.fn(),
             isSongLiked: false,
@@ -61,6 +62,8 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             setReplayGainMode: vi.fn(),
             openAudioEqualizer: vi.fn(),
             applyAudioSoundPreset: vi.fn(),
+            hasModEqualizerCurve: () => false,
+            releaseModEqualizerCurve: vi.fn(),
             runAutoMatchBestLyric: vi.fn(async () => true),
             toggleCurrentSongPureMusicMark: vi.fn(async () => true),
             canToggleCurrentSongPureMusicMark: true,
@@ -76,6 +79,7 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             toggleRemoteControlWindow: vi.fn(async () => true),
             toggleMainWindowAlwaysOnTop: vi.fn(async () => true),
             isWallpaperMode: false,
+            isWindowAlwaysOnTopSupported: true,
         },
         panel: {
             setPanelTab: vi.fn(),
@@ -113,6 +117,8 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             setLibraryWallSeamStyle: vi.fn(),
             toggleLibraryWallBackdropLyrics: vi.fn(),
             toggleLibraryWallBackdropBlur: vi.fn(),
+            libraryWallSeamDirection: () => 'auto' as const,
+            setLibraryWallSeamDirection: vi.fn(),
             ponderHintVisibility: 'always' as const,
             setPonderHintVisibility: vi.fn(),
             togglePonderTouchButton: vi.fn(),
@@ -143,6 +149,7 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             toggleHideFullscreenButton: vi.fn(),
             toggleNativeMacFullscreenButton: vi.fn(),
             toggleAutoHideCursorWithPlayerChrome: vi.fn(),
+            toggleHideCursorWhenIdle: vi.fn(),
             canAutoScanLocalLibrary: vi.fn(() => false),
             toggleLocalLibraryAutoScan: vi.fn(),
             canReportPlayback: vi.fn(() => false),
@@ -151,12 +158,16 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             modSystemEnabled: false,
             toggleVoiceInputPause: vi.fn(),
             togglePreventDisplaySleepDuringPlayback: vi.fn(),
+            toggleBackgroundThrottling: vi.fn(),
             toggleWallpaperMode: vi.fn(),
             toggleCloseToTray: vi.fn(),
             toggleHideRemoteControlTitlebar: vi.fn(),
+            toggleRemoteControlExpandCover: vi.fn(),
             unlockRemoteControl: vi.fn(),
             toggleObsKeepMainWindowAnimation: vi.fn(),
             toggleWallpaperMacAutohideDock: vi.fn(),
+            gpuPreference: () => 'auto',
+            setGpuPreference: vi.fn(),
             sleepTimerEnabled: false,
             setSleepTimerEnabled: vi.fn(),
             sleepTimerHours: 0,
@@ -189,6 +200,8 @@ const createContext = (overrides: CommandPaletteContextOverrides = {}): CommandP
             setMonetBackgroundTuning: vi.fn(),
             setLatentBackgroundTuning: vi.fn(),
             toggleVideoLayer: vi.fn(),
+            setSmartBeatMode: vi.fn(),
+            toggleSmartBeat: vi.fn(),
             pickVideoLayerFile: vi.fn(async () => null),
             usesWordSegmentation: true,
             lyricSegmentation: {
@@ -825,6 +838,20 @@ describe('command palette registry', () => {
         }
     });
 
+    it('hides the always-on-top command where the window cannot stay on top (native Wayland)', () => {
+        vi.stubGlobal('window', { electron: {} });
+
+        try {
+            const context = createContext();
+            context.navigation.isWindowAlwaysOnTopSupported = false;
+
+            const matches = getCommandPaletteMatches('主窗口置顶', context);
+            expect(matches.map(match => match.command.id)).not.toContain('desktop-toggle-main-window-always-on-top');
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
     it('toggles the desktop-local lyrics API', async () => {
         const getLyricApiStatus = vi.fn().mockResolvedValue({ enabled: false, running: false });
         const setLyricApiEnabled = vi.fn().mockResolvedValue({ enabled: true, running: true });
@@ -850,6 +877,19 @@ describe('command palette registry', () => {
             expect(match.command.id).toBe('desktop-toggle-prevent-display-sleep');
             await match.command.execute('', context);
             expect(context.settings.togglePreventDisplaySleepDuringPlayback).toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('matches and executes the desktop background throttling toggle', async () => {
+        vi.stubGlobal('window', { electron: {} });
+        try {
+            const context = createContext();
+            const [match] = getCommandPaletteMatches('后台节流', context);
+            expect(match.command.id).toBe('desktop-toggle-background-throttling');
+            await match.command.execute('', context);
+            expect(context.settings.toggleBackgroundThrottling).toHaveBeenCalled();
         } finally {
             vi.unstubAllGlobals();
         }
